@@ -7923,7 +7923,7 @@ static Instruction *foldFCmpFpTrunc(FCmpInst &I, Instruction *LHSI,
   APFloat NextRValue = *RValue;
   NextRValue.next(RoundDown);
 
-  // Round RValue to suitable value
+  // Promote 'RValue' and 'NextRValue' to 'LType'.
   APFloat ExtRValue = *RValue;
   APFloat ExtNextRValue = NextRValue;
   bool lossInfo;
@@ -7932,46 +7932,53 @@ static Instruction *foldFCmpFpTrunc(FCmpInst &I, Instruction *LHSI,
   ExtNextRValue.convert(LEleType->getFltSemantics(),
                         APFloat::rmNearestTiesToEven, &lossInfo);
 
-  // Binary search to find the maximal (or minimal) value after RValue promotion.
-  // RValue can't have special comparison rules, which means nan or inf is not
-  // allowed here.
-  APFloat RoundValue{LEleType->getFltSemantics()};
-  {
-    APFloat Two{LEleType->getFltSemantics(), 2};
+  // The (negative) maximum of 'RValue' may become infinity when rounded up
+  // (down). Set the limit of 'ExtNextRValue'.
+  if (NextRValue.isInfinity())
+    ExtNextRValue = scalbn(ExtRValue, 1, APFloat::rmNearestTiesToEven);
 
-    // The (negative) maximum of RValue will become infinity when rounded up (down).
-    // Set the limit of ExtNextRValue.
-    if (NextRValue.isInfinity()) {
-      ExtNextRValue = ExtRValue * Two;
+  // Binary search to find the maximal (or minimal) value after 'RValue'
+  // promotion. 'RValue' should obey normal comparison rules, which means nan or
+  // inf is not allowed here.
+  APFloat RoundValue{LEleType->getFltSemantics()};
+
+  APFloat LowBound = RoundDown ? ExtNextRValue : ExtRValue;
+  APFloat UpBound = RoundDown ? ExtRValue : ExtNextRValue;
+
+  auto IsRoundingFound = [](const APFloat &LowBound, const APFloat &UpBound) {
+    APFloat UpBoundNext = UpBound;
+    UpBoundNext.next(true);
+    return LowBound == UpBoundNext;
+  };
+
+  auto EqualRValueAfterTrunc = [&](const APFloat &ExtValue) {
+    APFloat TruncValue = ExtValue;
+    TruncValue.convert(REleType->getFltSemantics(),
+                       APFloat::rmNearestTiesToEven, &lossInfo);
+    return TruncValue == *RValue;
+  };
+
+  while (true) {
+    // Finish searching when 'LowBound' is next to 'UpBound'.
+    if (IsRoundingFound(LowBound, UpBound)) {
+      RoundValue = RoundDown ? UpBound : LowBound;
+      break;
     }
 
-    APFloat LowBound = RoundDown ? ExtNextRValue : ExtRValue;
-    APFloat UpBound = RoundDown ? ExtRValue : ExtNextRValue;
+    APFloat Mid = scalbn(LowBound + UpBound, -1, APFloat::rmNearestTiesToEven);
+    bool EqualRValue = EqualRValueAfterTrunc(Mid);
 
-    while (true) {
-      APFloat UpBoundNext = UpBound;
-      UpBoundNext.next(true);
-      if (UpBoundNext == LowBound) {
-        RoundValue = RoundDown ? UpBound : LowBound;
-        break;
-      }
-
-      APFloat Mid = (LowBound + UpBound) / Two;
-      APFloat TruncMid = Mid;
-      TruncMid.convert(REleType->getFltSemantics(),
-                       APFloat::rmNearestTiesToEven, &lossInfo);
-
-      if (TruncMid == *RValue) {
-        if (RoundDown)
-          UpBound = Mid;
-        else
-          LowBound = Mid;
-      } else {
-        if (RoundDown)
-          LowBound = Mid;
-        else
-          UpBound = Mid;
-      }
+    // 'EqualRValue' indicates whether Mid is qualified to be the final round
+    // value. if 'EqualRValue' == true, 'Mid' might be the final round value
+    //     if 'RoundDown' == true, 'UpBound' can't be the final round value
+    //     if 'RoudnDown' == false, 'DownBound' can't be the final round value
+    // if 'EqualRValue' == false, 'Mid' can't be the final round value
+    //     if 'RoundDown' == true, 'DownBound' can't be the final round value
+    //     if 'RoundDown' == false, 'UpBound' can't be the final round value
+    if (EqualRValue == RoundDown) {
+      UpBound = Mid;
+    } else {
+      LowBound = Mid;
     }
   }
 
