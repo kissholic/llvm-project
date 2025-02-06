@@ -24,6 +24,7 @@ def SwitchCase : StmtNode<Stmt, 1>;
 def CaseStmt : StmtNode<SwitchCase>;
 def DefaultStmt : StmtNode<SwitchCase>;
 def CapturedStmt : StmtNode<Stmt>;
+def SYCLKernelCallStmt : StmtNode<Stmt>;
 
 // Statements that might produce a value (for example, as the last non-null
 // statement in a GNU statement-expression).
@@ -162,6 +163,7 @@ def MaterializeTemporaryExpr : StmtNode<Expr>;
 def LambdaExpr : StmtNode<Expr>;
 def CXXFoldExpr : StmtNode<Expr>;
 def CXXParenListInitExpr: StmtNode<Expr>;
+def ResolvedUnexpandedPackExpr : StmtNode<Expr>;
 
 // C++ Coroutines expressions
 def CoroutineSuspendExpr : StmtNode<Expr, 1>;
@@ -231,6 +233,7 @@ def OMPLoopTransformationDirective : StmtNode<OMPLoopBasedDirective, 1>;
 def OMPTileDirective : StmtNode<OMPLoopTransformationDirective>;
 def OMPUnrollDirective : StmtNode<OMPLoopTransformationDirective>;
 def OMPReverseDirective : StmtNode<OMPLoopTransformationDirective>;
+def OMPInterchangeDirective : StmtNode<OMPLoopTransformationDirective>;
 def OMPForDirective : StmtNode<OMPLoopDirective>;
 def OMPForSimdDirective : StmtNode<OMPLoopDirective>;
 def OMPSectionsDirective : StmtNode<OMPExecutableDirective>;
@@ -297,6 +300,7 @@ def OMPTeamsGenericLoopDirective : StmtNode<OMPLoopDirective>;
 def OMPTargetTeamsGenericLoopDirective : StmtNode<OMPLoopDirective>;
 def OMPParallelGenericLoopDirective : StmtNode<OMPLoopDirective>;
 def OMPTargetParallelGenericLoopDirective : StmtNode<OMPLoopDirective>;
+def OMPAssumeDirective : StmtNode<OMPExecutableDirective>;
 def OMPErrorDirective : StmtNode<OMPExecutableDirective>;
 
 // OpenACC Constructs.
@@ -305,3 +309,20 @@ def OpenACCAssociatedStmtConstruct
     : StmtNode<OpenACCConstructStmt, /*abstract=*/1>;
 def OpenACCComputeConstruct : StmtNode<OpenACCAssociatedStmtConstruct>;
 def OpenACCLoopConstruct : StmtNode<OpenACCAssociatedStmtConstruct>;
+def OpenACCCombinedConstruct : StmtNode<OpenACCAssociatedStmtConstruct>;
+def OpenACCDataConstruct : StmtNode<OpenACCAssociatedStmtConstruct>;
+def OpenACCEnterDataConstruct : StmtNode<OpenACCConstructStmt>;
+def OpenACCExitDataConstruct : StmtNode<OpenACCConstructStmt>;
+def OpenACCHostDataConstruct : StmtNode<OpenACCAssociatedStmtConstruct>;
+def OpenACCWaitConstruct : StmtNode<OpenACCConstructStmt>;
+def OpenACCInitConstruct : StmtNode<OpenACCConstructStmt>;
+def OpenACCShutdownConstruct : StmtNode<OpenACCConstructStmt>;
+def OpenACCSetConstruct : StmtNode<OpenACCConstructStmt>;
+def OpenACCUpdateConstruct : StmtNode<OpenACCConstructStmt>;
+def OpenACCAtomicConstruct : StmtNode<OpenACCAssociatedStmtConstruct>;
+
+// OpenACC Additional Expressions.
+def OpenACCAsteriskSizeExpr : StmtNode<Expr>;
+
+// HLSL Constructs.
+def HLSLOutArgExpr : StmtNode<Expr>;

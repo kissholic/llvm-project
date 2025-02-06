@@ -173,7 +173,8 @@ TEST_F(CloneInstruction, Attributes) {
   Function *F2 = Function::Create(FT1, Function::ExternalLinkage);
 
   Argument *A = &*F1->arg_begin();
-  A->addAttr(Attribute::NoCapture);
+  A->addAttr(
+      Attribute::getWithCaptureInfo(A->getContext(), CaptureInfo::none()));
 
   SmallVector<ReturnInst*, 4> Returns;
   ValueToValueMapTy VMap;
@@ -475,7 +476,7 @@ protected:
 
     // Function DI
     auto *File = DBuilder.createFile("filename.c", "/file/dir/");
-    DITypeRefArray ParamTypes = DBuilder.getOrCreateTypeArray(std::nullopt);
+    DITypeRefArray ParamTypes = DBuilder.getOrCreateTypeArray({});
     DISubroutineType *FuncType =
         DBuilder.createSubroutineType(ParamTypes);
     auto *CU = DBuilder.createCompileUnit(dwarf::DW_LANG_C99,
@@ -514,7 +515,8 @@ protected:
     // cloning).
     auto *StructType = DICompositeType::getDistinct(
         C, dwarf::DW_TAG_structure_type, "some_struct", nullptr, 0, nullptr,
-        nullptr, 32, 32, 0, DINode::FlagZero, nullptr, 0, nullptr, nullptr);
+        nullptr, 32, 32, 0, DINode::FlagZero, nullptr, 0, std::nullopt, nullptr,
+        nullptr);
     auto *InlinedSP = DBuilder.createFunction(
         CU, "inlined", "inlined", File, 8, FuncType, 9, DINode::FlagZero,
         DISubprogram::SPFlagLocalToUnit | DISubprogram::SPFlagDefinition);
@@ -965,7 +967,7 @@ protected:
 
     // Create debug info
     auto *File = DBuilder.createFile("filename.c", "/file/dir/");
-    DITypeRefArray ParamTypes = DBuilder.getOrCreateTypeArray(std::nullopt);
+    DITypeRefArray ParamTypes = DBuilder.getOrCreateTypeArray({});
     DISubroutineType *DFuncType = DBuilder.createSubroutineType(ParamTypes);
     auto *CU = DBuilder.createCompileUnit(dwarf::DW_LANG_C99,
                                           DBuilder.createFile("filename.c",

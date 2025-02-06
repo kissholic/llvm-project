@@ -62,6 +62,7 @@
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <cassert>
@@ -286,6 +287,34 @@ private:
 
   const PathSensitiveBugReport *getBugReport() const { return R; }
 };
+
+std::string timeTraceName(const BugReportEquivClass &EQ) {
+  if (!llvm::timeTraceProfilerEnabled())
+    return "";
+  const auto &BugReports = EQ.getReports();
+  if (BugReports.empty())
+    return "Empty Equivalence Class";
+  const BugReport *R = BugReports.front().get();
+  const auto &BT = R->getBugType();
+  return ("Flushing EQC " + BT.getDescription()).str();
+}
+
+llvm::TimeTraceMetadata timeTraceMetadata(const BugReportEquivClass &EQ) {
+  // Must be called only when constructing non-bogus TimeTraceScope
+  assert(llvm::timeTraceProfilerEnabled());
+
+  const auto &BugReports = EQ.getReports();
+  if (BugReports.empty())
+    return {};
+  const BugReport *R = BugReports.front().get();
+  const auto &BT = R->getBugType();
+  auto Loc = R->getLocation().asLocation();
+  std::string File = "";
+  if (const auto *Entry = Loc.getFileEntry())
+    File = Entry->tryGetRealPathName().str();
+  return {BT.getCheckerName().str(), std::move(File),
+          static_cast<int>(Loc.getLineNumber())};
+}
 
 } // namespace
 
@@ -804,8 +833,7 @@ PathDiagnosticPieceRef PathDiagnosticBuilder::generateDiagForSwitchOP(
     os << "'Default' branch taken. ";
     End = ExecutionContinues(os, C);
   }
-  return std::make_shared<PathDiagnosticControlFlowPiece>(Start, End,
-                                                       os.str());
+  return std::make_shared<PathDiagnosticControlFlowPiece>(Start, End, sbuf);
 }
 
 PathDiagnosticPieceRef PathDiagnosticBuilder::generateDiagForGotoOP(
@@ -816,7 +844,7 @@ PathDiagnosticPieceRef PathDiagnosticBuilder::generateDiagForGotoOP(
   const PathDiagnosticLocation &End =
       getEnclosingStmtLocation(S, C.getCurrLocationContext());
   os << "Control jumps to line " << End.asLocation().getExpansionLineNumber();
-  return std::make_shared<PathDiagnosticControlFlowPiece>(Start, End, os.str());
+  return std::make_shared<PathDiagnosticControlFlowPiece>(Start, End, sbuf);
 }
 
 PathDiagnosticPieceRef PathDiagnosticBuilder::generateDiagForBinaryOP(
@@ -863,8 +891,7 @@ PathDiagnosticPieceRef PathDiagnosticBuilder::generateDiagForBinaryOP(
         PathDiagnosticLocation::createOperatorLoc(B, SM);
     }
   }
-  return std::make_shared<PathDiagnosticControlFlowPiece>(Start, End,
-                                                         os.str());
+  return std::make_shared<PathDiagnosticControlFlowPiece>(Start, End, sbuf);
 }
 
 void PathDiagnosticBuilder::generateMinimalDiagForBlockEdge(
@@ -900,7 +927,7 @@ void PathDiagnosticBuilder::generateMinimalDiagForBlockEdge(
     llvm::raw_string_ostream os(sbuf);
     PathDiagnosticLocation End = ExecutionContinues(os, C);
     C.getActivePath().push_front(
-        std::make_shared<PathDiagnosticControlFlowPiece>(Start, End, os.str()));
+        std::make_shared<PathDiagnosticControlFlowPiece>(Start, End, sbuf));
     break;
   }
 
@@ -922,7 +949,7 @@ void PathDiagnosticBuilder::generateMinimalDiagForBlockEdge(
       End = getEnclosingStmtLocation(S, C.getCurrLocationContext());
 
     C.getActivePath().push_front(
-        std::make_shared<PathDiagnosticControlFlowPiece>(Start, End, os.str()));
+        std::make_shared<PathDiagnosticControlFlowPiece>(Start, End, sbuf));
     break;
   }
 
@@ -947,8 +974,7 @@ void PathDiagnosticBuilder::generateMinimalDiagForBlockEdge(
         End = getEnclosingStmtLocation(S, C.getCurrLocationContext());
 
       C.getActivePath().push_front(
-          std::make_shared<PathDiagnosticControlFlowPiece>(Start, End,
-                                                           os.str()));
+          std::make_shared<PathDiagnosticControlFlowPiece>(Start, End, sbuf));
     } else {
       PathDiagnosticLocation End = ExecutionContinues(C);
 
@@ -973,8 +999,7 @@ void PathDiagnosticBuilder::generateMinimalDiagForBlockEdge(
         End = getEnclosingStmtLocation(S, C.getCurrLocationContext());
 
       C.getActivePath().push_front(
-          std::make_shared<PathDiagnosticControlFlowPiece>(Start, End,
-                                                           os.str()));
+          std::make_shared<PathDiagnosticControlFlowPiece>(Start, End, sbuf));
     } else {
       PathDiagnosticLocation End = ExecutionContinues(C);
       if (const Stmt *S = End.asStmt())
@@ -2198,7 +2223,7 @@ const Decl *PathSensitiveBugReport::getDeclWithIssue() const {
 void BasicBugReport::Profile(llvm::FoldingSetNodeID& hash) const {
   hash.AddInteger(static_cast<int>(getKind()));
   hash.AddPointer(&BT);
-  hash.AddString(Description);
+  hash.AddString(getShortDescription());
   assert(Location.isValid());
   Location.Profile(hash);
 
@@ -2213,7 +2238,7 @@ void BasicBugReport::Profile(llvm::FoldingSetNodeID& hash) const {
 void PathSensitiveBugReport::Profile(llvm::FoldingSetNodeID &hash) const {
   hash.AddInteger(static_cast<int>(getKind()));
   hash.AddPointer(&BT);
-  hash.AddString(Description);
+  hash.AddString(getShortDescription());
   PathDiagnosticLocation UL = getUniqueingLocation();
   if (UL.isValid()) {
     UL.Profile(hash);
@@ -2420,6 +2445,28 @@ PathSensitiveBugReport::getRanges() const {
   return Ranges;
 }
 
+static bool exitingDestructor(const ExplodedNode *N) {
+  // Need to loop here, as some times the Error node is already outside of the
+  // destructor context, and the previous node is an edge that is also outside.
+  while (N && !N->getLocation().getAs<StmtPoint>()) {
+    N = N->getFirstPred();
+  }
+  return N && isa<CXXDestructorDecl>(N->getLocationContext()->getDecl());
+}
+
+static const Stmt *
+findReasonableStmtCloseToFunctionExit(const ExplodedNode *N) {
+  if (exitingDestructor(N)) {
+    // If we are exiting a destructor call, it is more useful to point to
+    // the next stmt which is usually the temporary declaration.
+    if (const Stmt *S = N->getNextStmtForDiagnostics())
+      return S;
+    // If next stmt is not found, it is likely the end of a top-level
+    // function analysis. find the last execution statement then.
+  }
+  return N->getPreviousStmtForDiagnostics();
+}
+
 PathDiagnosticLocation
 PathSensitiveBugReport::getLocation() const {
   assert(ErrorNode && "Cannot create a location with a null node.");
@@ -2436,8 +2483,11 @@ PathSensitiveBugReport::getLocation() const {
     if (auto FE = P.getAs<FunctionExitPoint>()) {
       if (const ReturnStmt *RS = FE->getStmt())
         return PathDiagnosticLocation::createBegin(RS, SM, LC);
+
+      S = findReasonableStmtCloseToFunctionExit(ErrorNode);
     }
-    S = ErrorNode->getNextStmtForDiagnostics();
+    if (!S)
+      S = ErrorNode->getNextStmtForDiagnostics();
   }
 
   if (S) {
@@ -2871,6 +2921,7 @@ std::optional<PathDiagnosticBuilder> PathDiagnosticBuilder::findValidReport(
 
     if (R->isValid()) {
       if (Reporter.getAnalyzerOptions().ShouldCrosscheckWithZ3) {
+        llvm::TimeTraceScope TCS{"Crosscheck with Z3"};
         // If crosscheck is enabled, remove all visitors, add the refutation
         // visitor and check again
         R->clearVisitors();
@@ -3098,7 +3149,9 @@ BugReport *PathSensitiveBugReporter::findReportInEquivalenceClass(
   return exampleReport;
 }
 
-void BugReporter::FlushReport(BugReportEquivClass& EQ) {
+void BugReporter::FlushReport(BugReportEquivClass &EQ) {
+  llvm::TimeTraceScope TCS{timeTraceName(EQ),
+                           [&EQ]() { return timeTraceMetadata(EQ); }};
   SmallVector<BugReport*, 10> bugReports;
   BugReport *report = findReportInEquivalenceClass(EQ, bugReports);
   if (!report)

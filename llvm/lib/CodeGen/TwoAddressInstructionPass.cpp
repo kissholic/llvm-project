@@ -489,6 +489,9 @@ MachineInstr *TwoAddressInstructionImpl::findOnlyInterestingUse(
     bool &IsDstPhys) const {
   MachineOperand *UseOp = nullptr;
   for (MachineOperand &MO : MRI->use_nodbg_operands(Reg)) {
+    if (MO.isUndef())
+      continue;
+
     MachineInstr *MI = MO.getParent();
     if (MI->getParent() != MBB)
       return nullptr;
@@ -948,7 +951,7 @@ bool TwoAddressInstructionImpl::rescheduleMIBelowKill(
     return false;
 
   bool SeenStore = true;
-  if (!MI->isSafeToMove(AA, SeenStore))
+  if (!MI->isSafeToMove(SeenStore))
     return false;
 
   if (TII->getInstrLatency(InstrItins, *MI) > 1)
@@ -1131,7 +1134,7 @@ bool TwoAddressInstructionImpl::rescheduleKillAboveMI(
     return false;
 
   bool SeenStore = true;
-  if (!KillMI->isSafeToMove(AA, SeenStore))
+  if (!KillMI->isSafeToMove(SeenStore))
     return false;
 
   SmallVector<Register, 2> Uses;
@@ -1160,7 +1163,7 @@ bool TwoAddressInstructionImpl::rescheduleKillAboveMI(
     }
   }
 
-  // Check if the reschedule will not break depedencies.
+  // Check if the reschedule will not break dependencies.
   unsigned NumVisited = 0;
   for (MachineInstr &OtherMI :
        make_range(mi, MachineBasicBlock::iterator(KillMI))) {

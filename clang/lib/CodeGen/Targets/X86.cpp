@@ -24,22 +24,9 @@ bool IsX86_MMXType(llvm::Type *IRType) {
     IRType->getScalarSizeInBits() != 64;
 }
 
-static llvm::Type* X86AdjustInlineAsmType(CodeGen::CodeGenFunction &CGF,
+static llvm::Type *X86AdjustInlineAsmType(CodeGen::CodeGenFunction &CGF,
                                           StringRef Constraint,
-                                          llvm::Type* Ty) {
-  bool IsMMXCons = llvm::StringSwitch<bool>(Constraint)
-                     .Cases("y", "&y", "^Ym", true)
-                     .Default(false);
-  if (IsMMXCons && Ty->isVectorTy()) {
-    if (cast<llvm::VectorType>(Ty)->getPrimitiveSizeInBits().getFixedValue() !=
-        64) {
-      // Invalid MMX constraint
-      return nullptr;
-    }
-
-    return llvm::Type::getX86_MMXTy(CGF.getLLVMContext());
-  }
-
+                                          llvm::Type *Ty) {
   if (Constraint == "k") {
     llvm::Type *Int1Ty = llvm::Type::getInt1Ty(CGF.getLLVMContext());
     return llvm::FixedVectorType::get(Int1Ty, Ty->getScalarSizeInBits());
@@ -297,7 +284,7 @@ static void rewriteInputConstraintReferences(unsigned FirstIn,
       Pos = DigitEnd;
     }
   }
-  AsmString = std::move(OS.str());
+  AsmString = std::move(Buf);
 }
 
 /// Add output constraints for EAX:EDX because they are return registers.
@@ -808,6 +795,10 @@ ABIArgInfo X86_32ABIInfo::classifyArgumentType(QualType Ty, CCState &State,
     if (!IsWin32StructABI && isEmptyRecord(getContext(), Ty, true))
       return ABIArgInfo::getIgnore();
 
+    // Ignore 0 sized structs.
+    if (TI.Width == 0)
+      return ABIArgInfo::getIgnore();
+
     llvm::LLVMContext &LLVMContext = getVMContext();
     llvm::IntegerType *Int32 = llvm::Type::getInt32Ty(LLVMContext);
     bool NeedsPadding = false;
@@ -890,8 +881,8 @@ ABIArgInfo X86_32ABIInfo::classifyArgumentType(QualType Ty, CCState &State,
 
   if (isPromotableIntegerTypeForABI(Ty)) {
     if (InReg)
-      return ABIArgInfo::getExtendInReg(Ty);
-    return ABIArgInfo::getExtend(Ty);
+      return ABIArgInfo::getExtendInReg(Ty, CGT.ConvertType(Ty));
+    return ABIArgInfo::getExtend(Ty, CGT.ConvertType(Ty));
   }
 
   if (const auto *EIT = Ty->getAs<BitIntType>()) {
@@ -1341,6 +1332,15 @@ class X86_64ABIInfo : public ABIInfo {
 
     const llvm::Triple &T = getTarget().getTriple();
     return T.isOSLinux() || T.isOSNetBSD();
+  }
+
+  bool returnCXXRecordGreaterThan128InMem() const {
+    // Clang <= 20.0 did not do this.
+    if (getContext().getLangOpts().getClangABICompat() <=
+        LangOptions::ClangABI::Ver20)
+      return false;
+
+    return true;
   }
 
   X86AVXABILevel AVXLevel;
@@ -2076,6 +2076,13 @@ void X86_64ABIInfo::classify(QualType Ty, uint64_t OffsetBase, Class &Lo,
         classify(I.getType(), Offset, FieldLo, FieldHi, isNamedArg);
         Lo = merge(Lo, FieldLo);
         Hi = merge(Hi, FieldHi);
+        if (returnCXXRecordGreaterThan128InMem() &&
+            (Size > 128 && (Size != getContext().getTypeSize(I.getType()) ||
+                            Size > getNativeVectorSizeForAVXABI(AVXLevel)))) {
+          // The only case a 256(or 512)-bit wide vector could be used to return
+          // is when CXX record contains a single 256(or 512)-bit element.
+          Lo = Memory;
+        }
         if (Lo == Memory || Hi == Memory) {
           postMerge(Size, Lo, Hi);
           return;
@@ -2139,7 +2146,7 @@ void X86_64ABIInfo::classify(QualType Ty, uint64_t OffsetBase, Class &Lo,
       if (BitField) {
         assert(!i->isUnnamedBitField());
         uint64_t Offset = OffsetBase + Layout.getFieldOffset(idx);
-        uint64_t Size = i->getBitWidthValue(getContext());
+        uint64_t Size = i->getBitWidthValue();
 
         uint64_t EB_Lo = Offset / 64;
         uint64_t EB_Hi = (Offset + Size - 1) / 64;
@@ -2765,7 +2772,7 @@ X86_64ABIInfo::classifyArgumentType(QualType Ty, unsigned freeIntRegs,
 
       if (Ty->isIntegralOrEnumerationType() &&
           isPromotableIntegerTypeForABI(Ty))
-        return ABIArgInfo::getExtend(Ty);
+        return ABIArgInfo::getExtend(Ty, CGT.ConvertType(Ty));
     }
 
     break;
@@ -3133,26 +3140,63 @@ RValue X86_64ABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
     CGF.Builder.CreateStore(V, CGF.Builder.CreateStructGEP(Tmp, 1));
 
     RegAddr = Tmp.withElementType(LTy);
-  } else if (neededInt) {
-    RegAddr = Address(CGF.Builder.CreateGEP(CGF.Int8Ty, RegSaveArea, gp_offset),
-                      LTy, CharUnits::fromQuantity(8));
-
+  } else if (neededInt || neededSSE == 1) {
     // Copy to a temporary if necessary to ensure the appropriate alignment.
     auto TInfo = getContext().getTypeInfoInChars(Ty);
     uint64_t TySize = TInfo.Width.getQuantity();
     CharUnits TyAlign = TInfo.Align;
+    llvm::Type *CoTy = nullptr;
+    if (AI.isDirect())
+      CoTy = AI.getCoerceToType();
 
-    // Copy into a temporary if the type is more aligned than the
-    // register save area.
-    if (TyAlign.getQuantity() > 8) {
+    llvm::Value *GpOrFpOffset = neededInt ? gp_offset : fp_offset;
+    uint64_t Alignment = neededInt ? 8 : 16;
+    uint64_t RegSize = neededInt ? neededInt * 8 : 16;
+    // There are two cases require special handling:
+    // 1)
+    //    ```
+    //    struct {
+    //      struct {} a[8];
+    //      int b;
+    //    };
+    //    ```
+    //    The lower 8 bytes of the structure are not stored,
+    //    so an 8-byte offset is needed when accessing the structure.
+    // 2)
+    //   ```
+    //   struct {
+    //     long long a;
+    //     struct {} b;
+    //   };
+    //   ```
+    //   The stored size of this structure is smaller than its actual size,
+    //   which may lead to reading past the end of the register save area.
+    if (CoTy && (AI.getDirectOffset() == 8 || RegSize < TySize)) {
       Address Tmp = CGF.CreateMemTemp(Ty);
-      CGF.Builder.CreateMemCpy(Tmp, RegAddr, TySize, false);
-      RegAddr = Tmp;
+      llvm::Value *Addr =
+          CGF.Builder.CreateGEP(CGF.Int8Ty, RegSaveArea, GpOrFpOffset);
+      llvm::Value *Src = CGF.Builder.CreateAlignedLoad(CoTy, Addr, TyAlign);
+      llvm::Value *PtrOffset =
+          llvm::ConstantInt::get(CGF.Int32Ty, AI.getDirectOffset());
+      Address Dst = Address(
+          CGF.Builder.CreateGEP(CGF.Int8Ty, Tmp.getBasePointer(), PtrOffset),
+          LTy, TyAlign);
+      CGF.Builder.CreateStore(Src, Dst);
+      RegAddr = Tmp.withElementType(LTy);
+    } else {
+      RegAddr =
+          Address(CGF.Builder.CreateGEP(CGF.Int8Ty, RegSaveArea, GpOrFpOffset),
+                  LTy, CharUnits::fromQuantity(Alignment));
+
+      // Copy into a temporary if the type is more aligned than the
+      // register save area.
+      if (neededInt && TyAlign.getQuantity() > 8) {
+        Address Tmp = CGF.CreateMemTemp(Ty);
+        CGF.Builder.CreateMemCpy(Tmp, RegAddr, TySize, false);
+        RegAddr = Tmp;
+      }
     }
 
-  } else if (neededSSE == 1) {
-    RegAddr = Address(CGF.Builder.CreateGEP(CGF.Int8Ty, RegSaveArea, fp_offset),
-                      LTy, CharUnits::fromQuantity(16));
   } else {
     assert(neededSSE == 2 && "Invalid number of needed registers!");
     // SSE registers are spaced 16 bytes apart in the register save
