@@ -414,9 +414,7 @@ static void replaceWithGEP(CallInst *Call, uint32_t DimensionIndex,
 
   Constant *Zero =
       ConstantInt::get(Type::getInt32Ty(Call->getParent()->getContext()), 0);
-  SmallVector<Value *, 4> IdxList;
-  for (unsigned I = 0; I < Dimension; ++I)
-    IdxList.push_back(Zero);
+  SmallVector<Value *, 4> IdxList(Dimension, Zero);
   IdxList.push_back(Call->getArgOperand(GEPIndex));
 
   auto *GEP = GetElementPtrInst::CreateInBounds(getBaseElementType(Call),
@@ -836,8 +834,9 @@ Value *BPFAbstractMemberAccess::computeBaseAndAccessKey(CallInst *Call,
   // Put the access chain into a stack with the top as the head of the chain.
   while (Call) {
     CallStack.push(std::make_pair(Call, CInfo));
-    CInfo = AIChain[Call].second;
-    Call = AIChain[Call].first;
+    auto &Chain = AIChain[Call];
+    CInfo = Chain.second;
+    Call = Chain.first;
   }
 
   // The access offset from the base of the head of chain is also

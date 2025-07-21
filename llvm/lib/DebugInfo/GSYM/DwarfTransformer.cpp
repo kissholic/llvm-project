@@ -621,9 +621,7 @@ void DwarfTransformer::parseCallSiteInfoFromDwarf(CUInfo &CUI, DWARFDie Die,
     if (!FI.CallSites)
       FI.CallSites = CallSiteInfoCollection();
     // Append parsed DWARF callsites:
-    FI.CallSites->CallSites.insert(FI.CallSites->CallSites.end(),
-                                   CSIC.CallSites.begin(),
-                                   CSIC.CallSites.end());
+    llvm::append_range(FI.CallSites->CallSites, CSIC.CallSites);
   }
 }
 
@@ -741,7 +739,7 @@ llvm::Error DwarfTransformer::verify(StringRef GsymPath,
       uint32_t NumDwarfInlineInfos = DwarfInlineInfos.getNumberOfFrames();
       if (NumDwarfInlineInfos == 0) {
         DwarfInlineInfos.addFrame(
-            DICtx.getLineInfoForAddress(SectAddr, DLIS));
+            DICtx.getLineInfoForAddress(SectAddr, DLIS).value_or(DILineInfo()));
       }
 
       // Check for 1 entry that has no file and line info
@@ -782,7 +780,7 @@ llvm::Error DwarfTransformer::verify(StringRef GsymPath,
           const auto &dii = DwarfInlineInfos.getFrame(Idx);
           gsymFilename = LR->getSourceFile(Idx);
           // Verify function name
-          if (dii.FunctionName.find(gii.Name.str()) != 0)
+          if (!StringRef(dii.FunctionName).starts_with(gii.Name))
             Out << "error: address " << HEX64(Addr) << " DWARF function \""
                 << dii.FunctionName.c_str()
                 << "\" doesn't match GSYM function \"" << gii.Name << "\"\n";

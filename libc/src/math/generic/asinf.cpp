@@ -17,7 +17,7 @@
 #include "src/__support/macros/optimization.h"            // LIBC_UNLIKELY
 #include "src/__support/macros/properties/cpu_features.h" // LIBC_TARGET_CPU_HAS_FMA
 
-#include "inv_trigf_utils.h"
+#include "src/__support/math/inv_trigf_utils.h"
 
 namespace LIBC_NAMESPACE_DECL {
 
@@ -108,10 +108,16 @@ LLVM_LIBC_FUNCTION(float, asinf, (float x)) {
 
   // |x| > 1, return NaNs.
   if (LIBC_UNLIKELY(x_abs > 0x3f80'0000U)) {
+    if (xbits.is_signaling_nan()) {
+      fputil::raise_except_if_required(FE_INVALID);
+      return FPBits::quiet_nan().get_val();
+    }
+
     if (x_abs <= 0x7f80'0000U) {
       fputil::set_errno_if_required(EDOM);
       fputil::raise_except_if_required(FE_INVALID);
     }
+
     return FPBits::quiet_nan().get_val();
   }
 
